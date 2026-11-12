@@ -1,0 +1,4 @@
+models/tmp/
+*.aux
+*.log
+*.out

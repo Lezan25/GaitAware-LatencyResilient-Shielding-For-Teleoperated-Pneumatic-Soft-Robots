@@ -1,0 +1,2 @@
+A[] !collision
+A[] !overinflated

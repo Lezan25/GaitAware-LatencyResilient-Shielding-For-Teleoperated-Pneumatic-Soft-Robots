@@ -1,0 +1,236 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage[margin=2.5cm]{geometry}
+
+\setlength{\emergencystretch}{3em}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\theoremstyle{definition}
+\newtheorem*{remark}{Remark}
+
+\newcommand{\tu}{TU}
+\newcommand{\Safe}{\mathrm{Safe}}
+\newcommand{\CycleSafe}{\mathrm{CycleSafe}}
+\newcommand{\rem}{\mathrm{rem}}
+\newcommand{\sensed}{\text{sensed}}
+
+\title{Gait-Aware, Latency-Resilient Shielding for Teleoperated Pneumatic Soft Robots:\\Definitions, Theorems and Proofs}
+\date{}
+
+\begin{document}
+\maketitle
+
+This document supplements the paper. It states the definitions of the UPPAAL models, the three theorems (T1 to T3) and the two lemmas that lift the one-obstacle model-checking results to any number of obstacles on an unbounded grid. Results marked \emph{model-checked} come from the files in the repository. Results marked \emph{proof} are argued by hand here. Names in \texttt{code font} are the corresponding functions or constants of the models.
+
+\section{Notation}
+
+Cells are points of the grid $\mathbb{Z}^2$. The distance $d(a,b)=\max(|a_x-b_x|,|a_y-b_y|)$ is the Chebyshev distance, so neighbouring cells, diagonals included, are at distance 1. Time is discrete and counted in time units (\tu). Positions are expressed in the robot's frame, in which the tail is the cell $(0,0)$.
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Symbol & Meaning & In the model \\
+\midrule
+$u$ & heading, one of the 8 unit directions & \texttt{heading} \\
+$h=u$ & head cell; the robot occupies $\{(0,0),h\}$ & \texttt{headX()}, \texttt{headY()} \\
+$\ell=(\ell_1,\dots,\ell_4)$ & chamber levels in $\{0,1,2,3\}$; 3 is over-inflation & \texttt{level} \\
+$q$ & gait requested by the operator: F, L or R & \texttt{request} \\
+$g$ & gait executed this \tu: F, L, R or H (hold) & \texttt{chosenGait} \\
+$R$ & sensor range & \texttt{SENSOR\_RANGE} \\
+$P$ & minimum \tu\ between two moves of an obstacle & \texttt{MIN\_MOVE\_GAP} \\
+$r$ & danger radius: 1 if delay-aware, 0 otherwise & \texttt{DANGER\_RADIUS} \\
+$W=R+2$ & radius of the tracking window & \texttt{WINDOW} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Model}
+
+\subsection{Gaits and chambers}
+
+Each gait $g\in\{F,L,R\}$ has a cycle of $n_g$ phases, with $n_F=5$ and $n_L=n_R=3$, and a command table $C_g(k)$ that gives \emph{hold}, \emph{inflate} or \emph{deflate} for each chamber in phase $k$. Inflate raises a level by one, saturating at 3, and deflate sets it to 0. $P_g(k)$ is the chamber configuration at the start of phase $k$ when the gait runs from the empty configuration. The tables close: running the last phase from $P_g(n_g-1)$ returns to the empty configuration. All entries of every $P_g(k)$ are at most 2.
+
+Every phase table is checked directly. The forward gait goes through $0000\to1100\to2211\to2222\to0022\to0000$, turn left through $0000\to0110\to0220\to0000$, and turn right is the mirror image of turn left. H changes nothing.
+
+A \emph{cycle completes} when the last phase $n_g-1$ is executed, and only then does the robot move. For F the robot advances one cell, the old head becomes the tail and the new head is $2u$ in the old frame. For L and R the head rotates by $45^\circ$ around the tail. The cell newly entered is the \emph{target cell} $c_g$ (\texttt{targetCell}): $2u$ for F, and $u$ rotated by $\pm45^\circ$ for L and R. In all cases $d(c_g,h)=1$.
+
+\subsection{Executors}
+
+The \emph{chamber-aware executor} (\texttt{executeGait}) behaves as follows for a target gait $g$. If $\ell=P_g(k)$ for some phase $k$, it runs phase $k$. Otherwise it aligns: it takes one step towards the \emph{entry phase} $k^*$, which is the phase that needs the fewest chamber commands, then the fewest steps, then has the latest phase. In one such step every chamber below its target level inflates and every chamber above it deflates.
+
+The \emph{blind executor} remembers the gait in execution and its phase counter. On a new gait it restarts at phase 0, and it applies $C_g(k)$ whatever the levels are.
+
+$\mathrm{completes}(g)$ holds if executing $g$ now completes a cycle (\texttt{completesCycle}). $\rem(g)$ is the number of steps the executor needs to complete the next cycle of $g$ (\texttt{stepsToComplete}). For the chamber-aware executor it is $n_g-k$ if the levels are at phase $k$, and otherwise the number of alignment steps to $k^*$ plus $n_g-k^*$. For the blind executor it is $n_g-k$ if $g$ is the gait in execution at phase $k$, and otherwise $n_g$.
+
+\subsection{Obstacles and detection}
+
+Each obstacle $i$ has a true position $o_i$.
+
+\emph{Speed bound.} Two moves of an obstacle are at least $P$ \tu\ apart. A move goes to one of the 8 neighbouring cells and never onto a robot cell (passive safety). Between moves an obstacle may stand still for any time.
+
+\emph{Detection.} The detection $\hat o_i$ is the obstacle's position 1 \tu\ earlier. Since an obstacle moves at most once per \tu, $d(o_i,\hat o_i)\le1$.
+
+\emph{Sensing.} Obstacle $i$ is \emph{sensed} if $d(h,\hat o_i)\le R$ (\texttt{isSensed}). The shield uses only the detections of sensed obstacles.
+
+\subsection{One time unit}
+
+\begin{enumerate}
+  \item Obstacles move or wait. In the model they also appear in or leave the tracking window (Lemma~2).
+  \item The operator sets the request $q$. In the proofs this is any of F, L, R at any \tu.
+  \item The shield chooses the gait $g$ (Section~\ref{sec:shield}).
+  \item The executor applies $g$. If a cycle completes, the robot moves.
+\end{enumerate}
+
+A \emph{collision} is an obstacle occupying a robot cell after step 4 (\texttt{collision}). \emph{Over-inflation} is a chamber reaching level 3 (\texttt{overinflated}).
+
+\subsection{The shield}\label{sec:shield}
+
+\emph{Safety filter} (\texttt{passesFilter}). A gait passes the filter if it does not complete a cycle, or if its target cell keeps a distance greater than $r$ from every sensed detection:
+\[
+\Safe(g)\iff\neg\mathrm{completes}(g)\;\vee\;\forall i\ \sensed:\ d(c_g,\hat o_i)>r.
+\]
+H always passes, because it never completes a cycle.
+
+\emph{Control} (\texttt{shieldTakesControl}). The flag $m$ says whether the shield is in control. Its new value $m'$ in each \tu\ is as follows.
+\begin{itemize}
+  \item $m'=\mathit{false}$ if no obstacle is sensed.
+  \item Otherwise, if the shield is not in control ($m=\mathit{false}$), $m'=\neg\Safe(q)$. The shield takes control only when the requested step is unsafe.
+  \item Otherwise ($m=\mathit{true}$), $m'=\neg HB$, where $HB$ is the hand-back rule below.
+\end{itemize}
+
+\emph{Choice} (\texttt{chooseGait}). If $m'=\mathit{false}$ the shield executes the request. Otherwise it executes its avoidance gait. If the chosen gait fails the filter, it executes H instead. Hence every executed gait passes the filter.
+
+\emph{Hand-back rules} (\texttt{handBackAllowed}), evaluated while the shield is in control:
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Rule & Shields & Control returns when \\
+\midrule
+late & S1 to S4 & only once no obstacle is sensed \\
+early & S5 & $d(h,\hat o_i)>r+1$ for every sensed $i$ \\
+gait & S6, S7 & $\CycleSafe(q)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+with
+\[
+\CycleSafe(q)\iff\forall i\ \sensed:\ d(c_q,\hat o_i)>r+\Big\lceil\frac{\rem(q)-1}{P}\Big\rceil\qquad(\texttt{canCompleteSafely}).
+\]
+The completion step happens $\rem(q)-1$ \tu\ after the hand-back. In that time a sensed obstacle can move at most $\lceil(\rem(q)-1)/P\rceil$ times, so its detection can drift at most that far.
+
+\emph{Avoidance} (\texttt{avoidByClearance}, \texttt{avoidGaitAware}) chooses what the shield executes while in control. S1 to S6 maximise the clearance. S7 reaches only the clearance that an obstacle cannot close during the 1-\tu\ detection delay plus one full cycle of the request, namely $\lceil(1+n_q)/P\rceil+1$ (\texttt{maxObstacleMoves}), and prefers the request itself, then the gait that is quickest to complete from the current chambers. None of the results below depends on the avoidance policy.
+
+\section{Properties}
+
+\emph{Collision freedom:} no collision ever happens. \emph{Over-inflation freedom:} no chamber ever reaches level 3.
+
+\emph{Hand-back guarantee} (\texttt{earlyReintervention}). It is built from three definitions.
+\begin{itemize}
+  \item A \emph{hand-back} occurs at a \tu\ in which $m=\mathit{true}$ and $m'=\mathit{false}$ while some obstacle is sensed. The obstacles sensed at that \tu\ are the \emph{seen} obstacles.
+  \item The \emph{guarded cycle} starts at the hand-back, unless the requested cycle completes in that same \tu. It ends at the first of three events: the requested cycle completes, the request changes, or the shield takes control again.
+  \item An \emph{early re-intervention} occurs if the shield takes control again during a guarded cycle and some seen obstacle $i$ on its own makes the requested step unsafe, that is, $\mathrm{completes}(q)$, $i$ is sensed and $d(c_q,\hat o_i)\le r$ (\texttt{blocksRequest}).
+\end{itemize}
+The guarantee is that no early re-intervention happens. An obstacle that leaves the sensor range and comes back still counts as seen.
+
+\section{Theorems}
+
+\begin{theorem}[Safety layer, T1]\label{thm:t1}
+Assume $r=1$ and $R\ge2$. Take any rule that, at every \tu, executes a gait that passes the filter. Then no collision occurs, for any number of obstacles, any obstacle motion within the speed bound and any requests.
+\end{theorem}
+
+In particular this covers every shield with a delay-aware filter, that is S3 to S7, whatever its hand-back and avoidance.
+
+\begin{proof}
+\emph{Only one cell can be hit.} Obstacles never step onto a robot cell, so a collision can only happen when the robot moves, that is, when a cycle completes. Assume there was no collision before. After the move the robot occupies its old cell plus the target cell $c_g$ (the old head after F, the tail after L and R). The old cell is free of obstacles, so a collision means that some obstacle is at $c_g$.
+
+\emph{Sensed obstacle $i$.} The filter gives $d(c_g,\hat o_i)>1$. With $d(o_i,\hat o_i)\le1$ this gives $o_i\ne c_g$.
+
+\emph{Unsensed obstacle $i$.} Here $d(h,\hat o_i)>R$ and $d(c_g,h)=1$, so $d(c_g,\hat o_i)>R-1\ge1$. With $d(o_i,\hat o_i)\le1$ this gives $o_i\ne c_g$.
+\end{proof}
+
+\emph{Model-checked:} \texttt{T1\_filter.xml}, with one obstacle and any filtered gait, satisfies \texttt{A[] !collision}. It also does so with $R=2$ or $4$ and with $P=1$, $2$ or $4$. Both conditions of the theorem are necessary. With $r=0$ the filter trusts the detection, and the obstacle can have just moved into $c_g$. With $R=1$ an unsensed obstacle can be at $c_g$. Each case has a model-checked counterexample.
+
+\begin{theorem}[Executor, T2]\label{thm:t2}
+For any sequence of executed gaits, the chamber-aware executor never over-inflates.
+\end{theorem}
+
+\begin{proof}
+Every level stays at most 2. A phase step from $P_g(k)$ produces $P_g(k+1)$, or the empty configuration after the last phase. An alignment step inflates a chamber only while its level is below a target that is at most 2. Deflation and hold never raise a level.
+\end{proof}
+
+\emph{Model-checked:} \texttt{T2\_executor.xml}, with an arbitrary gait in every \tu, satisfies \texttt{A[] !overinflated}. Obstacles do not influence the executor. The blind executor fails: when forward is at levels 2211 and the gait switches to turn left, the blind restart inflates the head-right chamber from 2 to 3.
+
+\begin{theorem}[Gait-aware hand-back, T3]\label{thm:t3}
+For shields with the gait hand-back rule (S6 and S7), no early re-intervention occurs, for any number of obstacles, any obstacle motion within the speed bound and any requests.
+\end{theorem}
+
+It is established in three steps.
+\begin{enumerate}
+  \item \emph{Model-checked:} \texttt{T3\_handback.xml} satisfies \texttt{A[] !earlyReintervention}, also with $R=2$ or $4$ and with $P=2$ or $4$. The model has one obstacle. Before the hand-back it executes any filtered gait. A hand-back is allowed whenever the obstacle is sensed and $\CycleSafe(q)$ holds for it. Afterwards it may follow the request, or abort the guarded cycle at any time by executing another filtered gait. It flags an early re-intervention as soon as the obstacle on its own blocks the requested step, which is at least as strict as the shield.
+  \item Lemma~\ref{lem:projection} maps every run with $n$ obstacles onto this one-obstacle model.
+  \item Lemma~\ref{lem:window} maps the unbounded grid onto the model's tracking window.
+\end{enumerate}
+
+The early rule (S5) fails the same check, with a counterexample. The obstacle is far from the head, so the early rule hands back. The requested turn then swings the head towards the obstacle, and the shield has to take control again at the completion step. Hence the check is not vacuous.
+
+\emph{Intuition.} Suppose the robot follows the request after the hand-back. It completes after $\rem(q)$ steps, so the completion step comes $\rem(q)-1$ \tu\ after the hand-back. The detection of the obstacle is then at most $\lceil(\rem(q)-1)/P\rceil$ cells from its detection at the hand-back. The gait rule leaves exactly that margin, so at completion the request still passes the filter with respect to that obstacle. The model check does not rely on this intuition. In particular it does not assume that $\rem$ is exact when the executor still has to align.
+
+\begin{lemma}[Projection]\label{lem:projection}
+Take a run of S6 or S7 with $n$ obstacles, a hand-back at \tu\ $t$, and an obstacle $i$ seen at $t$. Keep the robot, the requests and obstacle $i$, and drop the other obstacles. The result is a run of \texttt{T3\_handback.xml} that hands back at $t$. If $i$ causes an early re-intervention in the original run, then \texttt{earlyReintervention} holds in the projected run.
+\end{lemma}
+
+\begin{proof}
+\emph{Before $t$.} Every executed gait passes the filter for all sensed obstacles, so in particular for $i$. The lemma model allows any such gait.
+
+\emph{At $t$.} The shield executes $q$. The hand-back rule implies that $q$ passes the filter, since $\CycleSafe(q)$ requires a distance greater than $r$. Obstacle $i$ is sensed, and $\CycleSafe(q)$ holds for every sensed obstacle, so for $i$. The lemma model allows the hand-back at exactly this point.
+
+\emph{After $t$, until the guarded cycle ends.} The shield executes $q$ in every \tu, because it deviates only by taking control again. The lemma model does the same. A request change ends the guarded cycle in both.
+
+\emph{If the shield takes control again.} In the original run some sensed obstacle blocks $q$. If $i$ blocks it, the lemma model flags \texttt{earlyReintervention} at that \tu. Otherwise the original run has no early re-intervention caused by $i$. The executed gait still passes the filter for $i$, and the lemma model treats it as an abort.
+
+\emph{Obstacle $i$ itself.} Its moves, waits and detections are the same in both runs. The model has no interaction between obstacles, so dropping the others changes nothing for $i$.
+\end{proof}
+
+The same argument without the hand-back part shows that the model of T1 covers every filtered run with $n$ obstacles. The hand proof of Theorem~\ref{thm:t1} does not need this.
+
+\begin{lemma}[Window abstraction]\label{lem:window}
+The models track an obstacle only while it is within $W=R+2$ of the tail. An obstacle leaves when it gets farther. An absent obstacle may appear on the border of the window ($d=W$) at any \tu, with any value of its move timer. If that value makes it free to move, it takes its move decision in the same tick. Every one-obstacle run on the unbounded grid is then matched by a run of the model in which the following are the same at every \tu: the robot, the requests, the control flag and the executed gaits; whether the obstacle is sensed and, if so, its detection; and, whenever the obstacle is within $W$ of the tail, its position and its move timer.
+\end{lemma}
+
+Collision, over-inflation and early re-intervention depend only on these quantities, so they transfer from the model to the grid.
+
+\begin{proof}
+\emph{(a) Outside the window the obstacle does not matter.} If $d(o,(0,0))>W$ then $d(\hat o,(0,0))\ge W=R+2$, and since the head is next to the tail, $d(h,\hat o)>R$. So the obstacle is not sensed. Robot cells are within 1 of the tail, so no collision is possible either. The shield uses only sensed detections, so its behaviour does not depend on the obstacle while it is outside.
+
+\emph{(b) Entering the window.} The obstacle's distance to the tail changes by at most one cell in step 1 (its own move) and by at most one in step 4 (a forward move of the robot; turns leave the tail fixed). So it enters at distance exactly $W$, in one of two ways. If both happen in the same \tu, the obstacle first enters by its own move and is then shifted within the window, which both runs reproduce.
+\begin{itemize}
+  \item \emph{By its own move} in step 1. The model makes it appear at that cell with its timer just reset. The previous position, needed for the detection in this \tu, differs: it is outside the window on the grid, and the border cell in the model. In both cases it is at distance at least $R+2$ from the tail, so the obstacle is unsensed in this \tu\ in both runs. From the next \tu\ on, the detection shows only positions from after the entry, and those agree in both runs.
+  \item \emph{Through the robot's forward move} in step 4. No decision happens until step 3 of the next \tu, so the model makes it appear in step 1 of the next \tu, at the same border cell and with the same timer. If the obstacle moves in that step, the model makes it appear with the timer that makes it free to move, and it moves in the same tick.
+\end{itemize}
+
+\emph{(c) Leaving} happens at the same moment in both runs.
+
+Between entry and leaving both runs have the same obstacle moves, so positions, timers and detections coincide.
+\end{proof}
+
+\section{Remarks on the models}
+
+\emph{One model for proofs and simulation.} Obstacle moves, appearances and operator requests are probabilistic branches. UPPAAL's symbolic checker treats every branch as possible, including branches with weight 0, so the proofs cover all behaviours allowed in Sections~2 and~3. The simulator follows the weights, so the simulated behaviour is a subset of what is verified.
+
+\emph{Simulation-only variables} are declared \texttt{meta}, so states that differ only in these values are merged: the walking direction of obstacles, the length of the operator's turn bursts, and the metrics. This loses no behaviour, because these values affect only the branch weights and the metrics, and every outcome of every branch is possible whatever their value.
+
+\emph{Deadlock freedom} is checked on every shield (\texttt{A[] !deadlock}). It holds because H always passes the filter and an obstacle can always wait.
+
+\section{What is not claimed}
+
+\emph{No guarantee beyond the guarded cycle.} The hand-back guarantee does not cover the cycle after the guarded one, request changes, or obstacles that were not in view at the hand-back. The remaining re-takeovers in the simulations come from these cases.
+
+\emph{Only within the stated assumptions.} Collision freedom relies on the speed bound (two moves at least $P$ \tu\ apart), the 1-\tu\ detection delay and passive safety (obstacles never step onto the robot).
+
+\emph{The robot model is an abstraction:} grid cells, motion only when a cycle completes, and three chamber levels. No claim is made about the physical robot.
+
+\end{document}

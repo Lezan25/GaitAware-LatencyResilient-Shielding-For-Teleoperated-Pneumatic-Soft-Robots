@@ -1,0 +1,391 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.6//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_6.dtd'>
+<nta>
+<declaration>const int NUM_OBSTACLES = 1;
+const int SENSOR_RANGE = 3;
+const int MIN_MOVE_GAP = 3;
+const int SPAWN_ONE_IN = 10;
+const int KEEP_DIRECTION_WEIGHT = 54;
+const int OTHER_DIRECTION_WEIGHT = 4;
+const int TURN_ONE_IN = 24;
+
+const int HANDBACK_LATE = 0, HANDBACK_EARLY = 1, HANDBACK_GAIT = 2;
+const int AVOID_MAX_CLEARANCE = 0, AVOID_GAIT_AWARE = 1;
+
+//                                         S1             S2             S3             S4             S5             S6             S7
+const bool CHAMBER_AWARE = true;        // false          true           false          true           true           true           true
+const bool DELAY_AWARE = true;          // false          false          true           true           true           true           true
+const int HANDBACK = HANDBACK_GAIT;     // LATE           LATE           LATE           LATE           EARLY          GAIT           GAIT
+const int AVOIDANCE = AVOID_GAIT_AWARE; // MAX_CLEARANCE  MAX_CLEARANCE  MAX_CLEARANCE  MAX_CLEARANCE  MAX_CLEARANCE  MAX_CLEARANCE  GAIT_AWARE
+
+const int DANGER_RADIUS = DELAY_AWARE ? 1 : 0;
+const int WINDOW = SENSOR_RANGE + 2;
+
+typedef int[-WINDOW - 2, WINDOW + 2] coord_t;
+typedef int[0, NUM_OBSTACLES - 1] obstacle_t;
+
+const int STAND_STILL = 8;
+const int DIR_X[8] = { 1, 1, 0, -1, -1, -1, 0, 1 };
+const int DIR_Y[8] = { 0, 1, 1, 1, 0, -1, -1, -1 };
+
+const int HEAD_LEFT = 0, HEAD_RIGHT = 1, TAIL_LEFT = 2, TAIL_RIGHT = 3;
+typedef int[HEAD_LEFT, TAIL_RIGHT] chamber_t;
+const int EMPTY = 0, FULL = 2, OVERINFLATED = 3;
+typedef int[EMPTY, OVERINFLATED] level_t;
+const int KEEP_LEVEL = 0, INFLATE = 1, DEFLATE = 2;
+
+const int HOLD = 0, FORWARD = 1, LEFT = 2, RIGHT = 3;
+typedef int[HOLD, RIGHT] gait_t;
+const int MAX_GAIT_LENGTH = 5;
+const int GAIT_LENGTH[4] = { 1, 5, 3, 3 };
+const int PHASE_COMMANDS[4][MAX_GAIT_LENGTH][4] = {
+  { {KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL}, {KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL},
+    {KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL}, {KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL},
+    {KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL} },
+  { {INFLATE, INFLATE, KEEP_LEVEL, KEEP_LEVEL}, {INFLATE, INFLATE, INFLATE, INFLATE},
+    {KEEP_LEVEL, KEEP_LEVEL, INFLATE, INFLATE}, {DEFLATE, DEFLATE, KEEP_LEVEL, KEEP_LEVEL},
+    {KEEP_LEVEL, KEEP_LEVEL, DEFLATE, DEFLATE} },
+  { {KEEP_LEVEL, INFLATE, INFLATE, KEEP_LEVEL}, {KEEP_LEVEL, INFLATE, INFLATE, KEEP_LEVEL},
+    {KEEP_LEVEL, DEFLATE, DEFLATE, KEEP_LEVEL}, {KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL},
+    {KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL} },
+  { {INFLATE, KEEP_LEVEL, KEEP_LEVEL, INFLATE}, {INFLATE, KEEP_LEVEL, KEEP_LEVEL, INFLATE},
+    {DEFLATE, KEEP_LEVEL, KEEP_LEVEL, DEFLATE}, {KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL},
+    {KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL, KEEP_LEVEL} }
+};
+const int PHASE_LEVELS[4][MAX_GAIT_LENGTH][4] = {
+  { {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0} },
+  { {0, 0, 0, 0}, {1, 1, 0, 0}, {2, 2, 1, 1}, {2, 2, 2, 2}, {0, 0, 2, 2} },
+  { {0, 0, 0, 0}, {0, 1, 1, 0}, {0, 2, 2, 0}, {0, 0, 0, 0}, {0, 0, 0, 0} },
+  { {0, 0, 0, 0}, {1, 0, 0, 1}, {2, 0, 0, 2}, {0, 0, 0, 0}, {0, 0, 0, 0} }
+};
+
+int[0, 7] heading = 0;
+level_t level[4] = { EMPTY, EMPTY, EMPTY, EMPTY };
+gait_t request = FORWARD;
+gait_t chosenGait = HOLD;
+gait_t blindGait = HOLD;
+int[0, MAX_GAIT_LENGTH - 1] blindPhase = 0;
+bool shieldInControl = false;
+bool movedForward = false;
+bool collision = false;
+bool overinflated = false;
+
+bool present[NUM_OBSTACLES];
+coord_t posX[NUM_OBSTACLES], posY[NUM_OBSTACLES];
+coord_t prevX[NUM_OBSTACLES], prevY[NUM_OBSTACLES];
+int[0, MIN_MOVE_GAP - 1] sinceMove[NUM_OBSTACLES];
+meta int[0, STAND_STILL] walking[NUM_OBSTACLES];
+int[0, NUM_OBSTACLES] obstaclesDone = NUM_OBSTACLES;
+bool joystickDone = false;
+meta int burstLeft = 0;
+
+broadcast chan tick, readJoystick, decide, execute, worldShift;
+
+int absolute(int v) { return v &lt; 0 ? -v : v; }
+int distance(int x1, int y1, int x2, int y2) {
+  return absolute(x1 - x2) &gt; absolute(y1 - y2) ? absolute(x1 - x2) : absolute(y1 - y2);
+}
+int headX() { return DIR_X[heading]; }
+int headY() { return DIR_Y[heading]; }
+bool isRobotCell(int x, int y) { return (x == 0 &amp;&amp; y == 0) || (x == headX() &amp;&amp; y == headY()); }
+
+int detectedX(obstacle_t i) { return sinceMove[i] &gt;= 1 ? posX[i] : prevX[i]; }
+int detectedY(obstacle_t i) { return sinceMove[i] &gt;= 1 ? posY[i] : prevY[i]; }
+bool isSensed(obstacle_t i) {
+  return present[i] &amp;&amp; distance(headX(), headY(), detectedX(i), detectedY(i)) &lt;= SENSOR_RANGE;
+}
+bool anySensed() { return exists (i : obstacle_t) isSensed(i); }
+bool farFromDetections(int x, int y, int radius) {
+  return forall (i : obstacle_t) (!isSensed(i) || distance(x, y, detectedX(i), detectedY(i)) &gt; radius);
+}
+
+bool atPhase(gait_t g, int k) { return forall (c : chamber_t) level[c] == PHASE_LEVELS[g][k][c]; }
+int currentPhase(gait_t g) {
+  for (k : int[0, MAX_GAIT_LENGTH - 1]) if (k &lt; GAIT_LENGTH[g] &amp;&amp; atPhase(g, k)) return k;
+  return -1;
+}
+int stepsToLevel(int from, int to) {
+  if (from == to) return 0;
+  if (from &lt; to) return to - from;
+  return 1 + to;
+}
+int alignCommands(gait_t g, int k) {
+  int n = 0;
+  for (c : chamber_t) n += stepsToLevel(level[c], PHASE_LEVELS[g][k][c]);
+  return n;
+}
+int alignSteps(gait_t g, int k) {
+  int n = 0, s;
+  for (c : chamber_t) {
+    s = stepsToLevel(level[c], PHASE_LEVELS[g][k][c]);
+    if (s &gt; n) n = s;
+  }
+  return n;
+}
+int entryPhase(gait_t g) {
+  int best = 0, bestCommands = 99, bestSteps = 99, commands, steps;
+  for (k : int[0, MAX_GAIT_LENGTH - 1]) {
+    if (k &lt; GAIT_LENGTH[g]) {
+      commands = alignCommands(g, k);
+      steps = alignSteps(g, k);
+      if (commands &lt; bestCommands || (commands == bestCommands &amp;&amp; steps &lt;= bestSteps)) {
+        best = k; bestCommands = commands; bestSteps = steps;
+      }
+    }
+  }
+  return best;
+}
+
+bool completesCycle(gait_t g) {
+  if (g == HOLD) return false;
+  if (!CHAMBER_AWARE) return g == blindGait &amp;&amp; blindPhase == GAIT_LENGTH[g] - 1;
+  return currentPhase(g) == GAIT_LENGTH[g] - 1;
+}
+int stepsToComplete(gait_t g) {
+  int k;
+  if (g == HOLD) return 0;
+  if (!CHAMBER_AWARE) return g == blindGait ? GAIT_LENGTH[g] - blindPhase : GAIT_LENGTH[g];
+  k = currentPhase(g);
+  if (k &gt;= 0) return GAIT_LENGTH[g] - k;
+  k = entryPhase(g);
+  return alignSteps(g, k) + GAIT_LENGTH[g] - k;
+}
+void targetCell(gait_t g, int &amp;x, int &amp;y) {
+  int newHeading = heading;
+  if (g == FORWARD) { x = 2 * DIR_X[heading]; y = 2 * DIR_Y[heading]; return; }
+  if (g == LEFT) newHeading = (heading + 1) % 8;
+  if (g == RIGHT) newHeading = (heading + 7) % 8;
+  x = DIR_X[newHeading]; y = DIR_Y[newHeading];
+}
+
+bool passesFilter(gait_t g) {
+  int x, y;
+  if (!completesCycle(g)) return true;
+  targetCell(g, x, y);
+  return farFromDetections(x, y, DANGER_RADIUS);
+}
+int handBackRadius(int steps) { return DANGER_RADIUS + (steps - 1 + MIN_MOVE_GAP - 1) / MIN_MOVE_GAP; }
+bool canCompleteSafely(gait_t g) {
+  int x, y;
+  if (g == HOLD) return true;
+  targetCell(g, x, y);
+  return farFromDetections(x, y, handBackRadius(stepsToComplete(g)));
+}
+
+bool guardedCycle = false;
+bool seenAtHandBack[NUM_OBSTACLES];
+bool earlyReintervention = false;
+void endGuardedCycle() {
+  guardedCycle = false;
+  for (i : obstacle_t) seenAtHandBack[i] = false;
+}
+bool blocksRequest(obstacle_t i) {
+  int x, y;
+  if (!completesCycle(request) || !isSensed(i)) return false;
+  targetCell(request, x, y);
+  return distance(x, y, detectedX(i), detectedY(i)) &lt;= DANGER_RADIUS;
+}
+
+bool lemmaAllows(gait_t g, int handBack) {
+  if (!passesFilter(g)) return false;
+  if (handBack == 0) return true;
+  return !guardedCycle &amp;&amp; g == request &amp;&amp; isSensed(0) &amp;&amp;
+         (HANDBACK == HANDBACK_EARLY ? farFromDetections(headX(), headY(), DANGER_RADIUS + 1) : canCompleteSafely(request));
+}
+void lemmaObserve(gait_t g, int handBack) {
+  if (guardedCycle &amp;&amp; seenAtHandBack[0] &amp;&amp; blocksRequest(0)) earlyReintervention = true;
+  if (guardedCycle &amp;&amp; (g != request || completesCycle(request))) endGuardedCycle();
+  if (handBack == 1 &amp;&amp; !completesCycle(request)) { guardedCycle = true; seenAtHandBack[0] = true; }
+}
+</declaration>
+<template>
+<name>Clock</name>
+<declaration>clock t;</declaration>
+<location id="Clock_start" x="-500" y="0"><name x="-540" y="-34">Start</name><committed/></location>
+<location id="Clock_idle" x="-300" y="0"><name x="-340" y="-34">Idle</name><label kind="invariant" x="-340" y="17">t &lt;= 1</label></location>
+<location id="Clock_obs" x="-50" y="0"><name x="-90" y="-34">ObstaclesMove</name><committed/></location>
+<location id="Clock_joy" x="200" y="0"><name x="160" y="-34">JoystickReads</name><committed/></location>
+<location id="Clock_dec" x="450" y="0"><name x="410" y="-34">ShieldDecides</name><committed/></location>
+<init ref="Clock_start"/>
+<transition><source ref="Clock_start"/><target ref="Clock_idle"/></transition>
+<transition><source ref="Clock_idle"/><target ref="Clock_obs"/><label kind="guard" x="-167" y="4">t == 1</label><label kind="synchronisation" x="-167" y="21">tick!</label><label kind="assignment" x="-167" y="38">t = 0, obstaclesDone = 0</label></transition>
+<transition><source ref="Clock_obs"/><target ref="Clock_joy"/><label kind="guard" x="83" y="4">obstaclesDone == NUM_OBSTACLES</label><label kind="synchronisation" x="83" y="21">readJoystick!</label></transition>
+<transition><source ref="Clock_joy"/><target ref="Clock_dec"/><label kind="guard" x="333" y="4">joystickDone</label><label kind="synchronisation" x="333" y="21">decide!</label><label kind="assignment" x="333" y="38">joystickDone = false</label></transition>
+<transition><source ref="Clock_dec"/><target ref="Clock_idle"/><label kind="synchronisation" x="458" y="124">execute!</label><nail x="450" y="120"/><nail x="-300" y="120"/></transition>
+</template>
+<template>
+<name>Joystick</name>
+<declaration>const int BURST_WEIGHT[4] = { 4, 3, 2, 1 };
+const int ALL_BURSTS_WEIGHT = 20;
+int forwardWeight() {
+  if (burstLeft &gt; 1) return 0;
+  if (burstLeft == 1) return 1;
+  return ALL_BURSTS_WEIGHT * (TURN_ONE_IN - 1);
+}
+int keepWeight() { return burstLeft &gt; 1 ? 1 : 0; }
+int burstWeight(int cycles) { return burstLeft == 0 ? BURST_WEIGHT[cycles - 1] : 0; }
+void setRequest(gait_t g) { if (g != request) endGuardedCycle(); request = g; }
+void requestForward() { burstLeft = 0; setRequest(FORWARD); }
+void keepRequest() { if (burstLeft &gt; 0) burstLeft--; }
+void startBurst(gait_t g, int cycles) { burstLeft = GAIT_LENGTH[g] * cycles; setRequest(g); }
+</declaration>
+<location id="Joystick_idle" x="-300" y="0"><name x="-340" y="-34">Idle</name></location>
+<location id="Joystick_read" x="-100" y="0"><name x="-140" y="-34">Reading</name><committed/></location>
+<branchpoint id="Joystick_bp" x="50" y="0"/>
+<init ref="Joystick_idle"/>
+<transition><source ref="Joystick_idle"/><target ref="Joystick_read"/><label kind="synchronisation" x="-192" y="4">readJoystick?</label></transition>
+<transition><source ref="Joystick_read"/><target ref="Joystick_bp"/></transition>
+<transition><source ref="Joystick_bp"/><target ref="Joystick_idle"/><label kind="assignment" x="258" y="-266">requestForward(), joystickDone = true</label><label kind="probability" x="258" y="-249">forwardWeight()</label><nail x="250" y="-270"/><nail x="-300" y="-270"/></transition>
+<transition><source ref="Joystick_bp"/><target ref="Joystick_idle"/><label kind="assignment" x="258" y="-206">keepRequest(), joystickDone = true</label><label kind="probability" x="258" y="-189">keepWeight()</label><nail x="250" y="-210"/><nail x="-300" y="-210"/></transition>
+<transition><source ref="Joystick_bp"/><target ref="Joystick_idle"/><label kind="assignment" x="258" y="-146">startBurst(LEFT, 1), joystickDone = true</label><label kind="probability" x="258" y="-129">burstWeight(1)</label><nail x="250" y="-150"/><nail x="-300" y="-150"/></transition>
+<transition><source ref="Joystick_bp"/><target ref="Joystick_idle"/><label kind="assignment" x="258" y="-86">startBurst(LEFT, 2), joystickDone = true</label><label kind="probability" x="258" y="-69">burstWeight(2)</label><nail x="250" y="-90"/><nail x="-300" y="-90"/></transition>
+<transition><source ref="Joystick_bp"/><target ref="Joystick_idle"/><label kind="assignment" x="258" y="-26">startBurst(LEFT, 3), joystickDone = true</label><label kind="probability" x="258" y="-9">burstWeight(3)</label><nail x="250" y="-30"/><nail x="-300" y="-30"/></transition>
+<transition><source ref="Joystick_bp"/><target ref="Joystick_idle"/><label kind="assignment" x="258" y="34">startBurst(LEFT, 4), joystickDone = true</label><label kind="probability" x="258" y="51">burstWeight(4)</label><nail x="250" y="30"/><nail x="-300" y="30"/></transition>
+<transition><source ref="Joystick_bp"/><target ref="Joystick_idle"/><label kind="assignment" x="258" y="94">startBurst(RIGHT, 1), joystickDone = true</label><label kind="probability" x="258" y="111">burstWeight(1)</label><nail x="250" y="90"/><nail x="-300" y="90"/></transition>
+<transition><source ref="Joystick_bp"/><target ref="Joystick_idle"/><label kind="assignment" x="258" y="154">startBurst(RIGHT, 2), joystickDone = true</label><label kind="probability" x="258" y="171">burstWeight(2)</label><nail x="250" y="150"/><nail x="-300" y="150"/></transition>
+<transition><source ref="Joystick_bp"/><target ref="Joystick_idle"/><label kind="assignment" x="258" y="214">startBurst(RIGHT, 3), joystickDone = true</label><label kind="probability" x="258" y="231">burstWeight(3)</label><nail x="250" y="210"/><nail x="-300" y="210"/></transition>
+<transition><source ref="Joystick_bp"/><target ref="Joystick_idle"/><label kind="assignment" x="258" y="274">startBurst(RIGHT, 4), joystickDone = true</label><label kind="probability" x="258" y="291">burstWeight(4)</label><nail x="250" y="270"/><nail x="-300" y="270"/></transition>
+</template>
+<template>
+<name>HandBackLemma</name>
+<declaration></declaration>
+<location id="HandBackLemma_idle" x="0" y="0"><name x="-40" y="-34">Idle</name></location>
+<init ref="HandBackLemma_idle"/>
+<transition><source ref="HandBackLemma_idle"/><target ref="HandBackLemma_idle"/><label kind="select" x="-72" y="-96">g : gait_t, handBack : int[0, 1]</label><label kind="guard" x="-72" y="-79">lemmaAllows(g, handBack)</label><label kind="synchronisation" x="-72" y="-62">decide?</label><label kind="assignment" x="-72" y="-45">lemmaObserve(g, handBack), chosenGait = g</label><nail x="-80" y="-100"/><nail x="80" y="-100"/></transition>
+</template>
+<template>
+<name>Robot</name>
+<declaration>int inflate(int l) { return l == OVERINFLATED ? OVERINFLATED : l + 1; }
+int applyCommand(int command, int l) {
+  if (command == INFLATE) return inflate(l);
+  if (command == DEFLATE) return EMPTY;
+  return l;
+}
+void setLevel(chamber_t c, int l) {
+  level[c] = l;
+  if (l == OVERINFLATED) overinflated = true;
+}
+void moveRobot(gait_t g) {
+  if (g == FORWARD) movedForward = true;
+  if (g == LEFT) heading = (heading + 1) % 8;
+  if (g == RIGHT) heading = (heading + 7) % 8;
+}
+void executeGait(gait_t g) {
+  int k, target;
+  if (g == HOLD) return;
+  if (!CHAMBER_AWARE) {
+    if (g != blindGait) { blindGait = g; blindPhase = 0; }
+    for (c : chamber_t) setLevel(c, applyCommand(PHASE_COMMANDS[g][blindPhase][c], level[c]));
+    if (blindPhase == GAIT_LENGTH[g] - 1) { blindPhase = 0; moveRobot(g); }
+    else blindPhase++;
+    return;
+  }
+  k = currentPhase(g);
+  if (k &gt;= 0) {
+    for (c : chamber_t) setLevel(c, applyCommand(PHASE_COMMANDS[g][k][c], level[c]));
+    if (k == GAIT_LENGTH[g] - 1) moveRobot(g);
+    return;
+  }
+  k = entryPhase(g);
+  for (c : chamber_t) {
+    target = PHASE_LEVELS[g][k][c];
+    if (level[c] &lt; target) setLevel(c, inflate(level[c]));
+    else if (level[c] &gt; target) setLevel(c, EMPTY);
+  }
+}
+bool robotHitObstacle() { return exists (i : obstacle_t) present[i] &amp;&amp; isRobotCell(posX[i], posY[i]); }
+</declaration>
+<location id="Robot_idle" x="-300" y="0"><name x="-340" y="-34">Idle</name></location>
+<location id="Robot_moved" x="0" y="0"><name x="-40" y="-34">Moved</name><committed/></location>
+<location id="Robot_check" x="300" y="0"><name x="260" y="-34">Checking</name><committed/></location>
+<init ref="Robot_idle"/>
+<transition><source ref="Robot_idle"/><target ref="Robot_moved"/><label kind="synchronisation" x="-142" y="4">execute?</label><label kind="assignment" x="-142" y="21">executeGait(chosenGait), chosenGait = HOLD</label></transition>
+<transition><source ref="Robot_moved"/><target ref="Robot_check"/><label kind="guard" x="158" y="-56">movedForward</label><label kind="synchronisation" x="158" y="-39">worldShift!</label><label kind="assignment" x="158" y="-22">movedForward = false</label><nail x="150" y="-60"/></transition>
+<transition><source ref="Robot_moved"/><target ref="Robot_check"/><label kind="guard" x="158" y="64">!movedForward</label><nail x="150" y="60"/></transition>
+<transition><source ref="Robot_check"/><target ref="Robot_idle"/><label kind="assignment" x="308" y="154">collision = collision || robotHitObstacle()</label><nail x="300" y="150"/><nail x="-300" y="150"/></transition>
+</template>
+<template>
+<name>Obstacle</name>
+<parameter>const obstacle_t id</parameter>
+<declaration>bool freeToMove(obstacle_t i) { return sinceMove[i] == MIN_MOVE_GAP - 1; }
+bool inWindow(int x, int y) { return absolute(x) &lt;= WINDOW &amp;&amp; absolute(y) &lt;= WINDOW; }
+void appearAt(obstacle_t i, int border, int timer, int direction) {
+  int side = border / (2 * WINDOW), offset = border % (2 * WINDOW), x, y;
+  if (side == 0) { x = -WINDOW + offset; y = -WINDOW; }
+  else if (side == 1) { x = WINDOW; y = -WINDOW + offset; }
+  else if (side == 2) { x = WINDOW - offset; y = WINDOW; }
+  else { x = -WINDOW; y = WINDOW - offset; }
+  present[i] = true;
+  posX[i] = x; posY[i] = y; prevX[i] = x; prevY[i] = y;
+  sinceMove[i] = timer;
+  walking[i] = direction;
+}
+void leaveWindow(obstacle_t i) {
+  present[i] = false;
+  posX[i] = 0; posY[i] = 0; prevX[i] = 0; prevY[i] = 0;
+  sinceMove[i] = 0;
+}
+void waitTick(obstacle_t i) {
+  sinceMove[i]++;
+  prevX[i] = posX[i]; prevY[i] = posY[i];
+}
+void moveObstacle(obstacle_t i, int direction) {
+  int x, y;
+  walking[i] = direction;
+  prevX[i] = posX[i]; prevY[i] = posY[i];
+  if (direction == STAND_STILL) return;
+  x = posX[i] + DIR_X[direction]; y = posY[i] + DIR_Y[direction];
+  if (isRobotCell(x, y)) return;
+  posX[i] = x; posY[i] = y;
+  sinceMove[i] = 0;
+}
+int directionWeight(obstacle_t i, int direction) {
+  return OTHER_DIRECTION_WEIGHT + (direction == walking[i] ? KEEP_DIRECTION_WEIGHT : 0);
+}
+bool staysInWindowAfterShift(obstacle_t i) {
+  return inWindow(posX[i] - DIR_X[heading], posY[i] - DIR_Y[heading]);
+}
+void shiftWithRobot(obstacle_t i) {
+  posX[i] -= DIR_X[heading]; posY[i] -= DIR_Y[heading];
+  prevX[i] -= DIR_X[heading]; prevY[i] -= DIR_Y[heading];
+}
+</declaration>
+<location id="Obstacle_absent" x="-500" y="0"><name x="-540" y="-34">Absent</name></location>
+<location id="Obstacle_absentTick" x="-500" y="-200"><name x="-540" y="-234">AbsentTick</name><committed/></location>
+<location id="Obstacle_appearing" x="-250" y="-350"><name x="-290" y="-384">Appearing</name><committed/></location>
+<location id="Obstacle_present" x="100" y="0"><name x="60" y="-34">Present</name></location>
+<location id="Obstacle_presentTick" x="100" y="-200"><name x="60" y="-234">PresentTick</name><committed/></location>
+<location id="Obstacle_deciding" x="100" y="-400"><name x="60" y="-434">Deciding</name><committed/></location>
+<location id="Obstacle_placed" x="500" y="-200"><name x="460" y="-234">Placed</name><committed/></location>
+<branchpoint id="Obstacle_bpSpawn" x="-500" y="-350"/>
+<branchpoint id="Obstacle_bpMove" x="300" y="-400"/>
+<init ref="Obstacle_absent"/>
+<transition><source ref="Obstacle_absent"/><target ref="Obstacle_absentTick"/><label kind="synchronisation" x="-492" y="-96">tick?</label></transition>
+<transition><source ref="Obstacle_absentTick"/><target ref="Obstacle_bpSpawn"/></transition>
+<transition><source ref="Obstacle_bpSpawn"/><target ref="Obstacle_absent"/><label kind="assignment" x="-642" y="-346">obstaclesDone++</label><label kind="probability" x="-642" y="-329">SPAWN_ONE_IN - 1</label><nail x="-650" y="-350"/><nail x="-650" y="0"/></transition>
+<transition><source ref="Obstacle_bpSpawn"/><target ref="Obstacle_appearing"/><label kind="probability" x="-367" y="-346">1</label></transition>
+<transition><source ref="Obstacle_appearing"/><target ref="Obstacle_present"/><label kind="select" x="-242" y="-96">border : int[0, 8 * WINDOW - 1], timer : int[0, MIN_MOVE_GAP - 1], direction : int[0, STAND_STILL]</label><label kind="guard" x="-242" y="-79">timer &lt; MIN_MOVE_GAP - 1</label><label kind="assignment" x="-242" y="-62">appearAt(id, border, timer, direction), obstaclesDone++</label><nail x="-250" y="-100"/></transition>
+<transition><source ref="Obstacle_appearing"/><target ref="Obstacle_deciding"/><label kind="select" x="-242" y="-446">border : int[0, 8 * WINDOW - 1], timer : int[0, MIN_MOVE_GAP - 1], direction : int[0, STAND_STILL]</label><label kind="guard" x="-242" y="-429">timer == MIN_MOVE_GAP - 1</label><label kind="assignment" x="-242" y="-412">appearAt(id, border, timer, direction)</label><nail x="-250" y="-450"/><nail x="100" y="-450"/></transition>
+<transition><source ref="Obstacle_present"/><target ref="Obstacle_presentTick"/><label kind="synchronisation" x="68" y="-96">tick?</label><nail x="60" y="-100"/></transition>
+<transition><source ref="Obstacle_presentTick"/><target ref="Obstacle_present"/><label kind="guard" x="148" y="-96">!freeToMove(id)</label><label kind="assignment" x="148" y="-79">waitTick(id), obstaclesDone++</label><nail x="140" y="-100"/></transition>
+<transition><source ref="Obstacle_presentTick"/><target ref="Obstacle_deciding"/><label kind="guard" x="108" y="-296">freeToMove(id)</label></transition>
+<transition><source ref="Obstacle_deciding"/><target ref="Obstacle_bpMove"/></transition>
+<transition><source ref="Obstacle_bpMove"/><target ref="Obstacle_placed"/><label kind="assignment" x="428" y="-466">moveObstacle(id, 0)</label><label kind="probability" x="428" y="-449">directionWeight(id, 0)</label><nail x="420" y="-470"/></transition>
+<transition><source ref="Obstacle_bpMove"/><target ref="Obstacle_placed"/><label kind="assignment" x="438" y="-441">moveObstacle(id, 1)</label><label kind="probability" x="438" y="-424">directionWeight(id, 1)</label><nail x="430" y="-445"/></transition>
+<transition><source ref="Obstacle_bpMove"/><target ref="Obstacle_placed"/><label kind="assignment" x="448" y="-416">moveObstacle(id, 2)</label><label kind="probability" x="448" y="-399">directionWeight(id, 2)</label><nail x="440" y="-420"/></transition>
+<transition><source ref="Obstacle_bpMove"/><target ref="Obstacle_placed"/><label kind="assignment" x="458" y="-391">moveObstacle(id, 3)</label><label kind="probability" x="458" y="-374">directionWeight(id, 3)</label><nail x="450" y="-395"/></transition>
+<transition><source ref="Obstacle_bpMove"/><target ref="Obstacle_placed"/><label kind="assignment" x="468" y="-366">moveObstacle(id, 4)</label><label kind="probability" x="468" y="-349">directionWeight(id, 4)</label><nail x="460" y="-370"/></transition>
+<transition><source ref="Obstacle_bpMove"/><target ref="Obstacle_placed"/><label kind="assignment" x="478" y="-341">moveObstacle(id, 5)</label><label kind="probability" x="478" y="-324">directionWeight(id, 5)</label><nail x="470" y="-345"/></transition>
+<transition><source ref="Obstacle_bpMove"/><target ref="Obstacle_placed"/><label kind="assignment" x="488" y="-316">moveObstacle(id, 6)</label><label kind="probability" x="488" y="-299">directionWeight(id, 6)</label><nail x="480" y="-320"/></transition>
+<transition><source ref="Obstacle_bpMove"/><target ref="Obstacle_placed"/><label kind="assignment" x="498" y="-291">moveObstacle(id, 7)</label><label kind="probability" x="498" y="-274">directionWeight(id, 7)</label><nail x="490" y="-295"/></transition>
+<transition><source ref="Obstacle_bpMove"/><target ref="Obstacle_placed"/><label kind="assignment" x="508" y="-266">moveObstacle(id, STAND_STILL)</label><label kind="probability" x="508" y="-249">directionWeight(id, STAND_STILL)</label><nail x="500" y="-270"/></transition>
+<transition><source ref="Obstacle_placed"/><target ref="Obstacle_present"/><label kind="guard" x="508" y="4">inWindow(posX[id], posY[id])</label><label kind="assignment" x="508" y="21">obstaclesDone++</label><nail x="500" y="0"/></transition>
+<transition><source ref="Obstacle_placed"/><target ref="Obstacle_absent"/><label kind="guard" x="658" y="-196">!inWindow(posX[id], posY[id])</label><label kind="assignment" x="658" y="-179">leaveWindow(id), obstaclesDone++</label><nail x="650" y="-200"/><nail x="650" y="250"/><nail x="-500" y="250"/></transition>
+<transition><source ref="Obstacle_present"/><target ref="Obstacle_present"/><label kind="guard" x="68" y="124">staysInWindowAfterShift(id)</label><label kind="synchronisation" x="68" y="141">worldShift?</label><label kind="assignment" x="68" y="158">shiftWithRobot(id)</label><nail x="60" y="120"/><nail x="140" y="120"/></transition>
+<transition><source ref="Obstacle_present"/><target ref="Obstacle_absent"/><label kind="guard" x="-192" y="84">!staysInWindowAfterShift(id)</label><label kind="synchronisation" x="-192" y="101">worldShift?</label><label kind="assignment" x="-192" y="118">leaveWindow(id)</label><nail x="-200" y="80"/></transition>
+</template>
+<system>system Clock, Joystick, HandBackLemma, Robot, Obstacle;</system>
+<queries>
+<query><formula>A[] !earlyReintervention</formula><comment></comment></query>
+</queries>
+</nta>
